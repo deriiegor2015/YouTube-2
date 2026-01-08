@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>YT‑like — Single HTML (limit 50)</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; margin:0; padding:12px; }
+    .wrap { display:flex; gap:12px; flex-direction:row; }
+    .left { width:320px; border-right:1px solid #eee; padding-right:12px; }
+    .right { flex:1; padding-left:12px; }
+    ul { list-style:none; padding:0; margin:0; }
+    li { padding:8px; cursor:pointer; border-radius:6px; }
+    li:hover { background:#f5f5f5; }
+    .upload { margin-top:10px; border-top:1px dashed #ddd; padding-top:8px; }
+    .chat { border:1px solid #ddd; padding:8px; border-radius:6px; max-width:100%; }
+    .messages { max-height:240px; overflow:auto; background:#fafafa; padding:8px; border-radius:6px; margin-bottom:8px; }
+    .msg { margin-bottom:8px; }
+    .ts { font-size:10px; color:#999; margin-left:6px; }
+    video { width:100%; max-width:900px; background:#000; border-radius:6px; }
+    .overlay {
+      position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+      background:rgba(0,0,0,0.6); color:#fff; z-index:9999; padding:20px; text-align:center;
+    }
+    .overlay .box { background:#222; padding:20px; border-radius:8px; max-width:90%; }
+    .small { font-size:13px; color:#555; }
+  </style>
+</head>
+<body>
+  <h2>YT‑like (single file) — обмеження 50</h2>
+
+  <div class="wrap">
+    <div class="left">
+      <h3>Відео</h3>
+      <ul id="videoList"><li>Завантаження...</li></ul>
+
+      <div class="upload">
+        <h4>Завантажити</h4>
+        <form id="uploadForm">
+          <input id="title" type="text" placeholder="Назва (необов'язково)" /><br/><br/>
+          <input id="file" type="file" accept="video/*" /><br/><br/>
+          <button id="uploadBtn" type="submit">Завантажити</button>
+          <div id="uploadStatus" class="small"></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="right">
+      <div id="playerArea">
+        <div id="empty">Оберіть відео зліва</div>
+        <div id="videoBlock" style="display:none;">
+          <h3 id="videoTitle"></h3>
+          <video id="player" controls preload="metadata"></video>
+        </div>
+      </div>
+
+      <div id="chatArea" style="display:none; margin-top:12px;">
+        <div class="chat">
+          <div class="small">Чат (кімната: <span id="roomName"></span>)</div>
+          <div id="messages" class="messages"></div>
+          <form id="msgForm" style="display:flex; gap:8px;">
+            <input id="author" type="text" placeholder="Нік (згенерується)" />
+            <input id="message" type="text" placeholder="Повідомлення..." />
+            <button id="sendBtn" type="submit">Відправити</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="overlay" class="overlay">
+    <div class="box">
+      <h3 id="overlayTitle">Сервер переповнений</h3>
+      <p id="overlayText">Зараз занадто багато користувачів. Спробуйте пізніше.</p>
+      <button id="overlayClose">Закрити</button>
+    </div>
+  </div>
+
+  <!-- Socket.IO client -->
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script>
+    // Якщо сервер на іншому хості — вкажи тут, напр. 'https://my-repl.username.repl.co'
+    const API_URL = ''; // залишити пустим для same-origin
+
+    const videoListEl = document.getElementById('videoList');
+    const uploadForm = document.getElementById('uploadForm');
+    const uploadStatus = document.getElementById('uploadStatus');
+    const titleInput = document.getElementById('title');
+    const fileInput = document.getElementById('file');
+    const uploadBtn = document.getElementById('uploadBtn');
+
+    const player = document.getElementById('player');
+    const videoTitle = document.getElementById('videoTitle');
+    const videoBlock = document.getElementById('videoBlock');
+    const emptyEl = document.getElementById('empty');
+
+    const chatArea = document.getElementById('chatArea');
+    const messagesEl = document.getElementById('messages');
+    const msgForm = document.getElementById('msgForm');
+    const authorInput = document.getElementById('author');
+    const messageInput = document.getElementById('message');
+    const sendBtn = document.getElementById('sendBtn');
+    const roomNameEl = document.getElementById('roomName');
+
+    const overlay = document.getElementById('overlay');
+    const overlayTitle = document.getElementById('overlayTitle');
+    const overlayText = document.getElementById('overlayText');
+    const overlayClose = document.getElementById('overlayClose');
+
+    let socket = null;
+    let currentRoom = null;
+    let disabledDueToFull = false;
+
+    function showOverlay(title, text, disableUI = true) {
+      overlayTitle.textContent = title;
+      overlayText.textContent = text;
+      overlay.style.display = 'flex';
+      if (disableUI) {
+        disabledDueToFull = true;
+        uploadBtn.disabled = true;
+        sendBtn.disabled = true;
+      }
+    }
+    function hideOverlay() {
+      overlay.style.display = 'none';
+    }
+    overlayClose.addEventListener('click', hideOverlay);
+
+    function el(tag, text, attrs={}) {
+      const e = document.createElement(tag);
+      if (text !== undefined) e.textContent = text;
+      Object.entries(attrs).forEach(([k,v]) => e.setAttribute(k,v));
+      return e;
+    }
+
+    async function loadVideos() {
+      videoListEl.innerHTML = '<li>Завантаження...</li>';
+      try {
+        const res = await fetch((API_URL || '') + '/api/videos');
+        if (!res.ok) throw new Error('API error');
+        const videos = await res.json();
+        renderVideoList(videos);
+      } catch (err) {
+        videoListEl.innerHTML = '<li>Не вдалося завантажити</li>';
+        console.error(err);
+      }
+    }
+
+    function renderVideoList(videos) {
+      videoListEl.innerHTML = '';
+      if (!videos || videos.length === 0) {
+        videoListEl.appendChild(el('li', 'Ще немає відео'));
+        return;
+      }
+      videos.forEach(v => {
+        const li = el('li');
+        li.style.padding = '8px';
+        const title = el('div', v.title || 'Untitled');
+        const meta = el('div', new Date(v.createdAt).toLocaleString());
+        meta.style.fontSize = '12px'; meta.style.color = '#666';
+        li.appendChild(title); li.appendChild(meta);
+        li.onclick = () => selectVideo(v);
+        videoListEl.appendChild(li);
+      });
+    }
+
+    function selectVideo(v) {
+      emptyEl.style.display = 'none';
+      videoBlock.style.display = 'block';
+      videoTitle.textContent = v.title || 'Untitled';
+      player.src = (v.url.startsWith('http') ? v.url : (location.origin + v.url));
+      setupChatForVideo(v.id);
+    }
+
+    uploadForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (disabledDueToFull) { alert('Сервер переповнений'); return; }
+      const file = fileInput.files[0];
+      if (!file) { uploadStatus.textContent = 'Оберіть файл'; return; }
+      uploadStatus.textContent = 'Завантаження...';
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('title', titleInput.value || file.name);
+      try {
+        const res = await fetch((API_URL || '') + '/api/upload', { method: 'POST', body: fd });
+        if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(txt || 'Upload failed');
+        }
+        uploadStatus.textContent = 'Завантажено';
+        await loadVideos();
+        titleInput.value = '';
+        fileInput.value = '';
+        setTimeout(()=> uploadStatus.textContent = '', 2000);
+      } catch (err) {
+        console.error(err);
+        uploadStatus.textContent = 'Помилка';
+      }
+    });
+
+    function setupChatForVideo(videoId) {
+      const room = `video:${videoId}`;
+      roomNameEl.textContent = room;
+      chatArea.style.display = 'block';
+      messagesEl.innerHTML = '';
+
+      if (!socket) {
+        // створюємо підключення (same origin або вказаний API_URL)
+        socket = (API_URL ? io(API_URL) : io());
+        socket.on('connect', () => {
+          console.log('socket connected', socket.id);
+        });
+
+        // Обробка коли сервер відмовляє через повний ліміт
+        socket.on('full', (data) => {
+          showOverlay('Сервер переповнений', (data && data.reason) ? data.reason : 'Зараз сервер переповнений — спробуйте пізніше.', true);
+          try { socket.disconnect(); } catch {}
+        });
+
+        // Обробка коли конкретна кімната повна
+        socket.on('room_full', (data) => {
+          const reason = (data && data.reason) ? data.reason : `Кімната ${data?.room || ''} переповнена`;
+          alert(reason);
+        });
+
+        socket.on('message', (m) => appendMessage(m));
+        socket.on('disconnect', (reason) => {
+          console.log('socket disconnected', reason);
+          if (!disabledDueToFull) {
+            // можна показати інше повідомлення, але не нав'язливо
+          }
+        });
+      } else {
+        // leave previous room if any
+        if (currentRoom) socket.emit('leave', { room: currentRoom });
+      }
+
+      currentRoom = room;
+      socket.emit('join', { room });
+      if (!authorInput.value) authorInput.value = `user_${Math.floor(Math.random()*10000)}`;
+    }
+
+    function appendMessage(m) {
+      const div = document.createElement('div');
+      div.className = 'msg';
+      if (m.system) {
+        const em = el('em', m.text);
+        em.style.color = '#777';
+        div.appendChild(em);
+      } else {
+        const strong = el('strong', (m.author || 'anon') + ': ');
+        div.appendChild(strong);
+        div.appendChild(document.createTextNode(m.text));
+        const ts = el('span', m.ts ? new Date(m.ts).toLocaleTimeString() : '', {class:'ts'});
+        ts.style.marginLeft = '6px';
+        div.appendChild(ts);
+      }
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    msgForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (disabledDueToFull) { alert('Сервер переповнений'); return; }
+      const text = messageInput.value.trim();
+      if (!text || !socket || !currentRoom) return;
+      const author = (authorInput.value || `user_${Math.floor(Math.random()*10000)}`).trim();
+      socket.emit('message', { room: currentRoom, author, text });
+      messageInput.value = '';
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (socket && currentRoom) {
+        try { socket.emit('leave', { room: currentRoom }); socket.disconnect(); } catch {}
+      }
+    });
+
+    // Ініціалізація
+    loadVideos();
+  </script>
+</body>
+</html>
